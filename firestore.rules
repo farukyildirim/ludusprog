@@ -1,0 +1,237 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // This security rules file assumes the following data structures:
+    //
+    // Collection: users/{userId}
+    // Document ID: userId (must match request.auth.uid)
+    // Fields:
+    //   - uid: string (required, 1-128 chars, matches auth.uid & document ID, immutable on update)
+    //   - email: string (required, 3-254 chars, valid email format, immutable on update)
+    //   - displayName: string (required, 1-100 chars) - User's display name
+    //   - role: string (required, enum: 'student' | 'instructor', immutable on self-update)
+    //   - completedLessons: list of strings (required, max 100 items) - Completed lesson IDs
+    //   - quizScores: map (required, max 200 entries) - Quiz score details keyed by quiz ID
+    //   - bookmarkedLessons: list of strings (required, max 100 items) - Bookmarked lesson IDs
+    //   - activeEngine: string (required, enum: 'unity' | 'godot' | 'unreal' | 'roblox') - Selected game engine
+    //   - createdAt: timestamp (required, immutable on update) - Creation timestamp
+    //   - updatedAt: timestamp (required) - Last modification timestamp
+    //   - university: string (optional, 0-100 chars) - Department or university name
+    //   - photoURL: string (optional, 0-500 chars, valid HTTP/HTTPS URL or empty string)
+    //   - notes: map (optional, max 200 entries) - Quick user lesson notes mapping
+    //
+    // Subcollection: users/{userId}/notes/{noteId}
+    // Document ID: noteId
+    // Fields:
+    //   - id: string (optional, 1-128 chars) - Note identifier
+    //   - userId: string (optional, must match userId and auth.uid, immutable on update)
+    //   - lessonId: string (optional, 1-100 chars) - Associated lesson ID
+    //   - title: string (optional, 0-200 chars) - Note title
+    //   - content: string (required, 1-10000 chars) - Note body content
+    //   - createdAt: timestamp (optional, immutable on update) - Creation timestamp
+    //   - updatedAt: timestamp (optional) - Last modification timestamp
+    //   - tags: list (optional, max 20 items) - Note categorization tags
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    // Check if the request is from an authenticated user
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if the authenticated user is the document owner
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Check if the user has an admin claim
+    function isAdmin() {
+      return isAuthenticated() &&
+        ('admin' in request.auth.token && request.auth.token.admin == true);
+    }
+
+    // Validate email format and length limits
+    function isValidEmail(email) {
+      return email is string &&
+        email.size() >= 3 &&
+        email.size() <= 254 &&
+        email.matches('^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$');
+    }
+
+    // Validate URL format (http or https) and max length
+    function isValidUrl(url) {
+      return url is string &&
+        url.size() <= 500 &&
+        (url.matches('^https://.*') || url.matches('^http://.*'));
+    }
+
+    // Check if timestamp is within the last 5 minutes and not in the future
+    function isRecent(time) {
+      return time is timestamp &&
+        time > request.time - duration.value(5, 'm') &&
+        time <= request.time;
+    }
+
+    // Validate supported game engine
+    function isValidEngine(engine) {
+      return engine in ['unity', 'godot', 'unreal', 'roblox'];
+    }
+
+    // Validate permitted user roles
+    function isValidRole(role) {
+      return role in ['student', 'instructor'];
+    }
+
+    // ===============================================================
+    // Domain Validators: Users Collection
+    // ===============================================================
+
+    // Core validation for user documents (called in BOTH create and update)
+    function isValidUser(data, userId) {
+      let requiredKeys = [
+        'uid', 'email', 'displayName', 'role',
+        'completedLessons', 'quizScores', 'bookmarkedLessons',
+        'activeEngine', 'createdAt', 'updatedAt'
+      ];
+      let allowedKeys = [
+        'uid', 'email', 'displayName', 'role',
+        'completedLessons', 'quizScores', 'bookmarkedLessons',
+        'activeEngine', 'createdAt', 'updatedAt',
+        'university', 'photoURL', 'notes'
+      ];
+
+      return data.keys().hasAll(requiredKeys) &&
+        data.keys().hasOnly(allowedKeys) &&
+        data.uid is string &&
+        data.uid == userId &&
+        data.uid == request.auth.uid &&
+        data.uid.size() > 0 &&
+        data.uid.size() <= 128 &&
+        isValidEmail(data.email) &&
+        data.displayName is string &&
+        data.displayName.size() > 0 &&
+        data.displayName.size() <= 100 &&
+        isValidRole(data.role) &&
+        data.completedLessons is list &&
+        data.completedLessons.size() <= 100 &&
+        data.quizScores is map &&
+        data.quizScores.size() <= 200 &&
+        data.bookmarkedLessons is list &&
+        data.bookmarkedLessons.size() <= 100 &&
+        isValidEngine(data.activeEngine) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp &&
+        (!('university' in data) || (data.university is string && data.university.size() <= 100)) &&
+        (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 500 && (data.photoURL == '' || isValidUrl(data.photoURL)))) &&
+        (!('notes' in data) || (data.notes is map && data.notes.size() <= 200));
+    }
+
+    // Validate user creation
+    function isValidUserCreate(userId) {
+      let data = request.resource.data;
+      return isValidUser(data, userId) &&
+        (data.createdAt == request.time || isRecent(data.createdAt)) &&
+        (data.updatedAt == request.time || isRecent(data.updatedAt));
+    }
+
+    // Validate user update
+    function isValidUserUpdate(userId) {
+      let data = request.resource.data;
+      return isValidUser(data, userId) &&
+        // Immutable identity and creation fields
+        data.uid == resource.data.uid &&
+        data.email == resource.data.email &&
+        data.createdAt == resource.data.createdAt &&
+        // Privilege escalation protection: role is immutable on self-update
+        (data.role == resource.data.role || isAdmin()) &&
+        // Temporal integrity: updatedAt must be current, recent, or advancing
+        (data.updatedAt == request.time || isRecent(data.updatedAt) || data.updatedAt >= resource.data.updatedAt);
+    }
+
+    // ===============================================================
+    // Domain Validators: Notes Subcollection
+    // ===============================================================
+
+    // Core validation for note documents
+    function isValidNote(data, userId) {
+      let allowedKeys = [
+        'id', 'userId', 'lessonId', 'title', 'content',
+        'createdAt', 'updatedAt', 'tags'
+      ];
+
+      return data.keys().hasAll(['content']) &&
+        data.keys().hasOnly(allowedKeys) &&
+        data.content is string &&
+        data.content.size() > 0 &&
+        data.content.size() <= 10000 &&
+        (!('id' in data) || (data.id is string && data.id.size() <= 128)) &&
+        (!('userId' in data) || (data.userId is string && data.userId == userId && data.userId == request.auth.uid)) &&
+        (!('lessonId' in data) || (data.lessonId is string && data.lessonId.size() <= 100)) &&
+        (!('title' in data) || (data.title is string && data.title.size() <= 200)) &&
+        (!('createdAt' in data) || data.createdAt is timestamp) &&
+        (!('updatedAt' in data) || data.updatedAt is timestamp) &&
+        (!('tags' in data) || (data.tags is list && data.tags.size() <= 20));
+    }
+
+    // Validate note creation
+    function isValidNoteCreate(userId) {
+      let data = request.resource.data;
+      return isValidNote(data, userId) &&
+        (!('createdAt' in data) || data.createdAt == request.time || isRecent(data.createdAt)) &&
+        (!('updatedAt' in data) || data.updatedAt == request.time || isRecent(data.updatedAt));
+    }
+
+    // Validate note update
+    function isValidNoteUpdate(userId) {
+      let data = request.resource.data;
+      return isValidNote(data, userId) &&
+        (!('createdAt' in resource.data) || !('createdAt' in data) || data.createdAt == resource.data.createdAt) &&
+        (!('userId' in resource.data) || !('userId' in data) || data.userId == resource.data.userId) &&
+        (!('updatedAt' in data) || data.updatedAt == request.time || isRecent(data.updatedAt) || data.updatedAt >= resource.data.updatedAt);
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    // User Profile and Progress Collection
+    match /users/{userId} {
+      // PII Protection: Only the authenticated document owner can read their document
+      allow read: if isOwner(userId);
+
+      // Create: Only the owner can create their document with strictly validated schema
+      allow create: if isOwner(userId) && isValidUserCreate(userId);
+
+      // Update: Only the owner can update their document; schema and immutability enforced
+      allow update: if isOwner(userId) && isValidUserUpdate(userId);
+
+      // Account deletion: Prohibited from standard client writes to prevent accidental data loss
+      allow delete: if isAdmin();
+
+      // Study Notes Subcollection
+      match /notes/{noteId} {
+        allow read, delete: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidNoteCreate(userId);
+        allow update: if isOwner(userId) && isValidNoteUpdate(userId);
+      }
+    }
+
+    // ===============================================================
+    // Default Deny
+    // ===============================================================
+    // All collections not explicitly matched above are strictly inaccessible
+    match /{document=**} {
+      allow read, write: false;
+    }
+  }
+}

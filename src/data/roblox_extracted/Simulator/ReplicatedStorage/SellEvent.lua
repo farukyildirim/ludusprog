@@ -1,0 +1,1 @@
+-- Create a RemoteEvent named SellEvent in ReplicatedStorage (Server handles sale)

@@ -1,0 +1,2 @@
+-- Example gun: raycast on activation (LocalScript required for visuals)
+-- This file is a placeholder; implement tool with LocalScript for client effects and RemoteEvent to server to apply damage.
